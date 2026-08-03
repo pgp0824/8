@@ -1,0 +1,113 @@
+name: 构建乐彩助手固定签名APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 读取仓库文件
+        uses: actions/checkout@v4
+
+      - name: 解压乐彩助手源码
+        shell: bash
+        run: |
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -q Happy8Assistant-source-with-cloud-build.zip -d extracted
+          test -f extracted/Happy8Assistant/settings.gradle.kts
+
+      - name: 设置JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 检查固定签名Secrets
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo "::error::缺少 ANDROID_KEYSTORE_BASE64"; exit 1; }
+          test -n "$KEYSTORE_PASSWORD" || { echo "::error::缺少 ANDROID_KEYSTORE_PASSWORD"; exit 1; }
+          test -n "$KEY_ALIAS" || { echo "::error::缺少 ANDROID_KEY_ALIAS"; exit 1; }
+          test -n "$KEY_PASSWORD" || { echo "::error::缺少 ANDROID_KEY_PASSWORD"; exit 1; }
+
+      - name: 恢复并验证固定签名
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/lecaizhushou-signing"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/lecaizhushou-signing/lecaizhushou-release.jks"
+          chmod 600 "$RUNNER_TEMP/lecaizhushou-signing/lecaizhushou-release.jks"
+          keytool -list \
+            -keystore "$RUNNER_TEMP/lecaizhushou-signing/lecaizhushou-release.jks" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_KEY_ALIAS" >/dev/null
+
+      - name: 设置Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装Android 36组件
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: 设置Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: 测试并生成固定签名APK
+        working-directory: extracted/Happy8Assistant
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/lecaizhushou-signing/lecaizhushou-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle --no-daemon clean testDebugUnitTest assembleRelease --stacktrace
+
+      - name: 验证APK签名
+        shell: bash
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify \
+            --verbose \
+            --print-certs \
+            extracted/Happy8Assistant/app/build/outputs/apk/release/app-release.apk
+
+      - name: 整理APK
+        shell: bash
+        run: |
+          cp extracted/Happy8Assistant/app/build/outputs/apk/release/app-release.apk 乐彩助手-v2.3.5-release.apk
+
+      - name: 上传固定签名APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: 乐彩助手-固定签名-APK
+          path: 乐彩助手-v2.3.5-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传单元测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 单元测试报告
+          path: extracted/Happy8Assistant/app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 30
